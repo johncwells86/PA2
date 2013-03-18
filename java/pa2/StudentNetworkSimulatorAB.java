@@ -3,7 +3,7 @@ package pa2;
 import java.util.ArrayList;
 import java.util.Queue;
 
-public class StudentNetworkSimulator extends NetworkSimulator {
+public class StudentNetworkSimulatorAB extends NetworkSimulator {
 	/*
 	 * Predefined Constants (static member variables):
 	 * 
@@ -58,64 +58,54 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// Also add any necessary methods (e.g. checksum of a String)
 	protected ArrayList<Packet> aQueue;
 	protected ArrayList<Packet> bQueue;
-	protected int aAckCounter;
-	protected int bAckCounter;
-	protected int aSequence;
-	protected int bSequence;
-	protected double timerInterval = 5;
+	protected Packet bLastReceivedFromA;
+	protected Packet aLastReceivedFromB;
 
-	protected void ResetTimerInterval() {
-		timerInterval = 5.0;
-	}
+	protected int aAckCounter = 0;
+	protected int bAckCounter = 0;
+	protected int aSequence = 0;
+	protected int bSequence = 0;
+	protected int totalGood = 0;
+	protected double timerInterval = 1000.0;
+	protected boolean isSending;
+	protected boolean isTiming;
 
 	protected void IncrementTimerInterval() {
-		timerInterval += 5.0;
-	}
-
-	protected int AckCounter(int host) {
-		if (host == A) {
-			return aAckCounter++ % 2;
-		} else if (host == B) {
-			return bAckCounter++ % 2;
-		} else {
-			return -1;
-		}
-	}
-
-	protected int SequenceCounter(int host) {
-		if (host == A) {
-			return aSequence++ % 2;
-		} else if (host == B) {
-			return bSequence++ % 2;
-		} else {
-			return -1;
-		}
+		timerInterval += 500.0;
 	}
 
 	protected int setStringCheckSum(int host, int seq, int ack, String payload) {
 		int val = 0;
 		val = seq + ack;
-		for (char c : payload.toCharArray()) {
-			val += Character.getNumericValue(c);
+
+		// Only A packets have payloads to evaluate.
+		if (host == A) {
+			for (char c : payload.toCharArray()) {
+				val += Character.getNumericValue(c);
+			}
 		}
 		return val;
 	}
 
-	protected boolean verifyChecksum(Packet p) {
+	protected boolean verifyChecksum(int host, Packet p) {
 		int val = 0;
 		int chk = p.getChecksum();
 		int ack = p.getAcknum();
 		int seq = p.getSeqnum();
 		val = ack + seq;
-		String payload = p.getPayload();
-		for (char c : payload.toCharArray()) {
-			val += Character.getNumericValue(c);
+
+		// Only check payload if host is B, because A only receives acks.
+		if (host == B) {
+			String payload = p.getPayload();
+			for (char c : payload.toCharArray()) {
+				val += Character.getNumericValue(c);
+			}
 		}
 		return val == (chk);
 	}
 
 	// This is the constructor. Don't touch!
-	public StudentNetworkSimulator(int numMessages, double loss, double corrupt, double avgDelay, int trace, long seed) {
+	public StudentNetworkSimulatorAB(int numMessages, double loss, double corrupt, double avgDelay, int trace, long seed) {
 		super(numMessages, loss, corrupt, avgDelay, trace, seed);
 	}
 
@@ -124,20 +114,32 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// the data in such a message is delivered in-order, and correctly, to
 	// the receiving upper layer.
 	protected void aOutput(Message message) {
-		// receive message, make packet, set sequence, set ack, set checksum,
-		// start timer.
+		System.out.println("\n===================\naOutput:\t Sending message to B (to layer 3).");
 		String data = message.getData();
-		int ack = AckCounter(A);
-		int seq = SequenceCounter(A);
+		int ack = this.aSequence;
+		int seq = this.aSequence;
 		int chksum = setStringCheckSum(A, seq, ack, data);
-//		System.out.println("aOutput called, sending message to B (to layer 3).");
-		//System.out.println(String.format("Data:\t%s\nSeq:\t%d\nChk:\t%d\nAck\t%d\n", data, seq, chksum, ack));
+
 		Packet p = new Packet(seq, ack, chksum, data);
 		aQueue.add(p);
 
-		toLayer3(A, p);
-//		ResetTimerInterval();
-//		startTimer(A, timerInterval);
+		// while (!aQueue.isEmpty()) {
+		// if (!isSending) {
+		isSending = true;
+
+		 if (isTiming) {
+		isTiming = false;
+		stopTimer(A);
+		 }
+
+		startTimer(A, timerInterval);
+		isTiming = true;
+		toLayer3(A, aQueue.get(0));
+		// } else {
+		// System.out.println("Discarding");
+		// }
+		// }
+
 	}
 
 	// This routine will be called whenever a packet sent from the B-side
@@ -145,11 +147,41 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// arrives at the A-side. "packet" is the (possibly corrupted) packet
 	// sent from the B-side.
 	protected void aInput(Packet packet) {
-//		System.out.println("aInput called, sending message Up to A (layer 5).");
-		int chk = packet.getChecksum();
-		int ack = packet.getAcknum();
-		// stopTimer(A);
+//		System.out.println("\naInput:\t Verifying packet integrity.");
 
+		stopTimer(A);
+		isTiming = false;
+
+		int seq = this.aSequence;
+		int ack = packet.getAcknum();
+		System.out.println(String.format("A:\naInput:\t Seq: %s\t Packet Seq: %s\t Packet Ack: %s", seq, packet.getSeqnum(), packet.getAcknum()));
+		boolean goodChk = verifyChecksum(A, packet);
+		if (goodChk && (seq == ack)) {
+
+			isSending = false;
+			this.totalGood++;
+			System.out.println("aInput:\t Successfully sent packet to B, total: " + this.totalGood);
+
+			// Packet was sent to B successfully, remove from queue.
+
+			aQueue.remove(0);
+
+			// Change the seq counter for A.
+			if (this.aSequence == 0) {
+				this.aSequence = 1;
+			} else {
+				this.aSequence = 0;
+			}
+			toLayer5(A, packet.getPayload());
+		} else {
+			// Packet was not sent successfully, resend last to B.
+
+			System.out.println("aInput:\t Packet sent to B corrupt. Resending.");
+			startTimer(A, timerInterval);
+			isTiming = true;
+			toLayer3(A, aQueue.get(0));
+		}
+		// }
 	}
 
 	// This routine will be called when A's timer expires (thus generating a
@@ -158,15 +190,20 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// for how the timer is started and stopped.
 	protected void aTimerInterrupt() {
 		// Lost the packet, increment the timer interval.
-		System.out.println("Timer interrupt on A detected...");
+		System.out.println("aTimerInterrupt:\t Timer interrupt on A detected...");
+		// System.out.println(timerInterval);
+		isTiming = false;
 		// IncrementTimerInterval();
-		// // Get current sequence, current ack, send new packet...
-		//
-		// Packet p = aQueue.get(0);
-		//
-		// // Re-send the packet.
-		// toLayer3(A, p);
-		// startTimer(A, timerInterval);
+
+		// Get current sequence, current ack, send new packet...
+		if (aQueue.size() > 0) {
+			Packet p = aQueue.get(0);
+
+			startTimer(A, timerInterval);
+			isTiming = true;
+			toLayer3(A, p);
+		}
+
 	}
 
 	// This routine will be called once, before any of your other A-side
@@ -174,8 +211,11 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// initialization (e.g. of member variables you add to control the state
 	// of entity A).
 	protected void aInit() {
+		this.aSequence = 0;
+		this.aLastReceivedFromB = null;
+		this.isSending = false;
+		this.isTiming = false;
 		this.aQueue = new ArrayList<Packet>();
-		stopTimer(A);
 	}
 
 	// This routine will be called whenever a packet sent from the B-side
@@ -183,21 +223,48 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// arrives at the B-side. "packet" is the (possibly corrupted) packet
 	// sent from the A-side.
 	protected void bInput(Packet packet) {
-		int ack, chk, seq;
-		
-		String payload;
-//		System.out.println("Packet from A received.");
-//		System.out.println(String.format("Data:\t%s\nSeq:\t%d\nChk:\t%d\nAck\t%d\n", packet.getPayload(), packet.getSeqnum(), packet.getChecksum(), packet.getAcknum()));
+		System.out.println("\nbInput:\t Packet from A received.\tPayload: " + packet.getPayload());
+		if (packet.getSeqnum() != this.bSequence) {
+			// Duplicate packet.
+			System.out.println("bInput:\t Duplicate Packet from A received.");
+			System.out.println(String.format("bInput:\t Seq: %s\t Packet Seq: %s\tPacket Ack: %s", bSequence, packet.getSeqnum(), packet.getAcknum()));
+			packet.setPayload(" ");
+			int seq = packet.getSeqnum();
+			toLayer3(B, new Packet(seq, seq, setStringCheckSum(B, seq, seq, " "), " "));
+		} else {
+			// System.out.println("bInput:\t Unique Packet from A received.");
+			this.bLastReceivedFromA = packet;
+			int seq = this.bSequence;
+			int chk = setStringCheckSum(B, seq, seq, " ");
+			String payload;
+			System.out.println(String.format("bInput:\t Seq: %s\t Packet Seq: %s\t", seq, packet.getSeqnum()));
 
-		if (verifyChecksum(packet)) {
-			System.out.println("Checksum verified accurate. Sending to host");
-			payload = packet.getPayload();
-			toLayer5(B, payload);
-		}
-		else{
-			System.out.println("Bad Checksum... Requesting retransmit");
-			packet.setPayload("");
-			toLayer3(A, packet);			
+			if (verifyChecksum(B, packet) && (seq == packet.getSeqnum())) {
+				System.out.println("bInput:\t Good Packet from A received.");
+				// System.out.println("bInput:\t Checksum verified accurate. Sending to host");
+				toLayer3(B, new Packet(seq, seq, chk, " ")); // Send ack.
+				System.out.println(String.format("bInput:\t Seq: %s\t Packet Seq: %s\tPacket Ack: %s", bSequence, packet.getSeqnum(), packet.getAcknum()));
+				// Increment sequence number
+				if (this.bSequence == 0) {
+					this.bSequence = 1;
+				} else {
+					this.bSequence = 0;
+				}
+
+				// Send to B's host
+				payload = packet.getPayload();
+				toLayer5(B, payload);
+
+			} else {
+				System.out.println("bInput:\t Bad Checksum... Requesting retransmit");
+				// System.out.println(String.format("==========Received===========\nAck: %d\t Chk: %d\t Seq: %d\t Payload: %s\t",
+				// packet.getAcknum(), packet.getChecksum(), packet.getSeqnum(),
+				// packet.getPayload()));
+				// System.out.println(String.format("==========Expected===========\nAck: %d\t Chk: %d\t Seq: %d\t Payload: %s\t\n\n",
+				// seq, chk, seq, packet.getPayload()));
+				packet.setPayload(" ");
+				toLayer3(B, new Packet(packet));
+			}
 		}
 	}
 
@@ -206,6 +273,7 @@ public class StudentNetworkSimulator extends NetworkSimulator {
 	// initialization (e.g. of member variables you add to control the state
 	// of entity B).
 	protected void bInit() {
+		this.bLastReceivedFromA = null;
 		this.bAckCounter = 0;
 		this.bSequence = 0;
 		this.bQueue = new ArrayList<Packet>();
